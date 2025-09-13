@@ -1,0 +1,52 @@
+{
+  "name": "theophysics-transcription",
+  "version": "1.0.0",
+  "description": "AI-powered video transcription and analysis system for THEOPHYSICS research",
+  "main": "worker/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy-frontend": "wrangler pages deploy frontend --project-name=theophysics-transcription",
+    "db-setup": "wrangler d1 execute transcription-pipeline --file=./database/schema.sql",
+    "db-reset": "wrangler d1 execute transcription-pipeline --command='DROP TABLE IF EXISTS videos; DROP TABLE IF EXISTS transcripts; DROP TABLE IF EXISTS ai_analysis;' && npm run db-setup",
+    "test": "echo \"Tests coming soon...\"",
+    "lint": "echo \"Linting coming soon...\"",
+    "build": "echo \"Build complete - ready for deployment\""
+  },
+  "keywords": [
+    "transcription",
+    "ai",
+    "cloudflare",
+    "workers",
+    "theophysics",
+    "quantum",
+    "consciousness",
+    "research",
+    "video-analysis",
+    "whisper",
+    "text-to-speech"
+  ],
+  "author": "David (YellowKidokc)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/theophysics-transcription.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/theophysics-transcription/issues"
+  },
+  "homepage": "https://github.com/yourusername/theophysics-transcription#readme",
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  },
+  "dependencies": {},
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "cloudflare": {
+    "account_id": "1180fbbc951e8e3d67a5a36a1026faa5",
+    "zone_id": "your_zone_id_here",
+    "domain": "faiththruphysics.com",
+    "subdomain": "transcribe"
+  }
+}

@@ -1,0 +1,47 @@
+name = "theophysics-transcription"
+main = "worker/index.js"
+compatibility_date = "2024-09-05"
+account_id = "d6e387eea4a4dda973d797ece5c5c40a"
+
+# Environment bindings
+[env.production]
+name = "theophysics-transcription"
+
+[env.development]
+name = "theophysics-transcription-dev"
+
+# AI binding for Whisper and analysis
+[ai]
+binding = "AI"
+
+# D1 Database binding
+[[d1_databases]]
+binding = "TRANSCRIPTION_DB"
+database_name = "transcription-pipeline"
+database_id = "564eb09f-2409-4b60-82a5-8076b77792c9"
+
+# R2 Storage binding for video files
+[[r2_buckets]]
+binding = "TRANSCRIPTION_VIDEOS"
+bucket_name = "transcription-videos"
+
+# KV for caching (optional)
+[[kv_namespaces]]
+binding = "CACHE"
+id = "your_kv_namespace_id"
+preview_id = "your_kv_namespace_preview_id"
+
+# Custom domain configuration
+[[routes]]
+pattern = "transcribe.faiththruphysics.com/*"
+custom_domain = true
+
+# Environment variables
+[vars]
+ENVIRONMENT = "production"
+API_VERSION = "1.0.0"
+SERVICE_NAME = "THEOPHYSICS Transcription Pipeline"
+
+# Secrets (set via wrangler secret put)
+# ELEVENLABS_API_KEY - for text-to-speech
+# AI_GATEWAY_TOKEN - for enhanced AI routing
