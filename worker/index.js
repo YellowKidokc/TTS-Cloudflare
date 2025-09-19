@@ -10,7 +10,7 @@ export default {
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Custom-Auth-Key',
     };
 
     if (request.method === 'OPTIONS') {
@@ -23,6 +23,10 @@ export default {
         return await handleVideoUpload(request, env, corsHeaders);
       }
       
+      if (path === '/initiate-upload' && request.method === 'POST') {
+        return await handleInitiateUpload(request, env, corsHeaders);
+      }
+
       if (path === '/transcribe' && request.method === 'POST') {
         return await handleTranscription(request, env, corsHeaders);
       }
@@ -42,16 +46,22 @@ export default {
       if (path === '/status') {
         return await handleStatus(request, env, corsHeaders);
       }
+      
+      if (path === '/render' && request.method === 'POST') {
+        return await handleBrowserRendering(request, env, corsHeaders);
+      }
 
       // Default API info
       return Response.json({
         service: 'THEOPHYSICS Video Transcription Pipeline',
         version: '1.0.0',
         endpoints: [
-          'POST /upload - Upload video file',
+          'POST /upload - Upload video file or finalize Stream upload',
+          'POST /initiate-upload - Get a direct upload URL for large files',
           'POST /transcribe - Process transcription',
           'POST /analyze - AI content analysis',
           'POST /tts - Text-to-speech conversion',
+          'POST /render - Browser rendering (markdown, PDF, JSON, links)',
           'GET /search - Search transcripts',
           'GET /status - Service status'
         ],
@@ -70,19 +80,180 @@ export default {
   }
 };
 
-// Handle video file upload to R2
-async function handleVideoUpload(request, env, corsHeaders) {
-  const formData = await request.formData();
-  const file = formData.get('video');
-  const title = formData.get('title') || 'Untitled Video';
-  const sourceType = formData.get('source_type') || 'upload';
+// Handle initiating a direct creator upload to Cloudflare Stream
+async function handleInitiateUpload(request, env, corsHeaders) {
+  const { name } = await request.json();
 
-  if (!file) {
-    return Response.json({ error: 'No video file provided' }, { 
+  if (!name) {
+    return Response.json({ error: 'File name is required' }, {
+      status: 400,
+      headers: corsHeaders
+    });
+  }
+
+  const accountId = env.ACCOUNT_ID || 'd6e387eea4a4dda973d797ece5c5c40a';
+  const apiToken = env.CLOUDFLARE_API_TOKEN;
+
+  if (!apiToken) {
+    // In a real app, you'd have this as a secret
+    return Response.json({ error: 'CLOUDFLARE_API_TOKEN secret not set' }, {
+      status: 500,
+      headers: corsHeaders
+    });
+  }
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/stream?direct_user=true`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      'maxDurationSeconds': 7200, // 2 hours
+      'expiry': new Date(Date.now() + 2 * 3600 * 1000).toISOString(),
+      'allowedOrigins': ['*'], // IMPORTANT: Restrict this in production to your frontend's domain
+      'meta': {
+        'name': name
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    return Response.json({ error: 'Failed to initiate direct upload', details: errorText }, {
+      status: response.status,
+      headers: corsHeaders
+    });
+  }
+
+  const { result } = await response.json();
+
+  return Response.json({
+    success: true,
+    uploadURL: result.uploadURL,
+    videoUID: result.uid
+  }, { headers: corsHeaders });
+}
+
+
+// Handle video file upload to R2 or URL processing
+async function handleVideoUpload(request, env, corsHeaders) {
+  const contentType = request.headers.get('content-type');
+  
+  if (contentType?.includes('application/json')) {
+    // Handle URL-based content or finalize Stream upload
+    const { url, title, source_type, content_type, extracted_content, videoUID } = await request.json();
+    
+    if (videoUID) {
+      return await handleStreamUpload(videoUID, title, source_type, env, corsHeaders);
+    }
+    
+    return await handleUrlContent(url, title, source_type, content_type, extracted_content, env, corsHeaders);
+  } else {
+    // Handle direct file upload (for smaller files)
+    const formData = await request.formData();
+    const file = formData.get('video');
+    const title = formData.get('title') || 'Untitled Video';
+    const sourceType = formData.get('source_type') || 'upload';
+
+    if (!file) {
+      return Response.json({ error: 'No video file provided' }, { 
+        status: 400, 
+        headers: corsHeaders 
+      });
+    }
+    
+    return await handleFileUpload(file, title, sourceType, env, corsHeaders);
+  }
+}
+
+// Create a record for a video uploaded via Cloudflare Stream
+async function handleStreamUpload(videoUID, title, sourceType, env, corsHeaders) {
+  try {
+    // Store in D1 database, marking it as a Stream video
+    const result = await env.TRANSCRIPTION_DB.prepare(
+      `INSERT INTO videos (title, file_path, source_type, transcription_status)
+      VALUES (?, ?, ?, 'pending')`
+    ).bind(title, `stream:${videoUID}`, sourceType).run();
+
+    return Response.json({
+      success: true,
+      videoId: result.meta.last_row_id,
+      videoUID: videoUID,
+      message: 'Video upload via Stream finalized - ready for transcription'
+    }, { headers: corsHeaders });
+
+  } catch (error) {
+    return Response.json({
+      error: 'Stream upload handling failed: ' + error.message
+    }, {
+      status: 500,
+      headers: corsHeaders
+    });
+  }
+}
+
+
+// Handle URL-based content (articles, videos, etc.)
+async function handleUrlContent(url, title, sourceType, contentType, extractedContent, env, corsHeaders) {
+  if (!url) {
+    return Response.json({ error: 'No URL provided' }, { 
       status: 400, 
       headers: corsHeaders 
     });
   }
+
+  try {
+    // Store URL-based content in database
+    const result = await env.TRANSCRIPTION_DB.prepare(
+      `INSERT INTO videos (title, url, source_type, transcription_status, file_path)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(
+      title || `${sourceType} content`,
+      url,
+      sourceType,
+      contentType === 'article' ? 'completed' : 'pending',
+      contentType === 'article' ? 'extracted' : null
+    ).run();
+
+    const videoId = result.meta.last_row_id;
+
+    // If we have extracted content (articles), store it as "transcript"
+    if (extractedContent && contentType === 'article') {
+      const wordCount = extractedContent.split(' ').length;
+      
+      await env.TRANSCRIPTION_DB.prepare(
+        `INSERT INTO transcripts (video_id, transcript_text, confidence_score, word_count, processing_time_ms)
+        VALUES (?, ?, ?, ?, ?)
+      `).bind(
+        videoId,
+        extractedContent,
+        0.9, // High confidence for extracted articles
+        wordCount,
+        0 // No processing time for pre-extracted content
+      ).run();
+    }
+
+    return Response.json({
+      success: true,
+      videoId: videoId,
+      url: url,
+      contentType: contentType,
+      message: contentType === 'article' ? 'Article content extracted and ready for analysis' : 'URL stored - processing needed'
+    }, { headers: corsHeaders });
+
+  } catch (error) {
+    return Response.json({
+      error: 'URL processing failed: ' + error.message
+    }, { 
+      status: 500,
+      headers: corsHeaders 
+    });
+  }
+}
+
+// Handle file upload to R2
+async function handleFileUpload(file, title, sourceType, env, corsHeaders) {
 
   // Generate unique filename
   const timestamp = Date.now();
@@ -104,8 +275,8 @@ async function handleVideoUpload(request, env, corsHeaders) {
     });
 
     // Store in D1 database
-    const result = await env.TRANSCRIPTION_DB.prepare(`
-      INSERT INTO videos (title, file_path, source_type, transcription_status)
+    const result = await env.TRANSCRIPTION_DB.prepare(
+      `INSERT INTO videos (title, file_path, source_type, transcription_status)
       VALUES (?, ?, ?, 'pending')
     `).bind(title, filename, sourceType).run();
 
@@ -139,8 +310,8 @@ async function handleTranscription(request, env, corsHeaders) {
 
   try {
     // Get video info from database
-    const video = await env.TRANSCRIPTION_DB.prepare(`
-      SELECT * FROM videos WHERE id = ?
+    const video = await env.TRANSCRIPTION_DB.prepare(
+      `SELECT * FROM videos WHERE id = ?
     `).bind(videoId).first();
 
     if (!video) {
@@ -151,21 +322,43 @@ async function handleTranscription(request, env, corsHeaders) {
     }
 
     // Update status to processing
-    await env.TRANSCRIPTION_DB.prepare(`
-      UPDATE videos SET transcription_status = 'processing' WHERE id = ?
+    await env.TRANSCRIPTION_DB.prepare(
+      `UPDATE videos SET transcription_status = 'processing' WHERE id = ?
     `).bind(videoId).run();
 
-    // Get video file from R2
-    const videoFile = await env.TRANSCRIPTION_VIDEOS.get(video.file_path);
-    if (!videoFile) {
-      throw new Error('Video file not found in storage');
+    let audioBuffer;
+    const filePath = video.file_path;
+
+    if (filePath.startsWith('stream:')) {
+      // Video is in Cloudflare Stream
+      const videoUID = filePath.split(':')[1];
+      const accountId = env.ACCOUNT_ID || 'd6e387eea4a4dda973d797ece5c5c40a';
+      const apiToken = env.CLOUDFLARE_API_TOKEN;
+
+      const streamResponse = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${videoUID}/downloads`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiToken}` }
+      });
+
+      if (!streamResponse.ok) throw new Error('Failed to get download URL from Stream');
+      const { result: { default: { url: downloadUrl } } } = await streamResponse.json();
+      
+      const videoResponse = await fetch(downloadUrl);
+      if (!videoResponse.ok) throw new Error('Failed to download video from Stream');
+      audioBuffer = await videoResponse.arrayBuffer();
+
+    } else {
+      // Video is in R2
+      const videoFile = await env.TRANSCRIPTION_VIDEOS.get(filePath);
+      if (!videoFile) {
+        throw new Error('Video file not found in R2 storage');
+      }
+      audioBuffer = await videoFile.arrayBuffer();
     }
 
     const startTime = Date.now();
 
     // Call Whisper AI via Workers AI
-    const audioBuffer = await videoFile.arrayBuffer();
-    
     const whisperResponse = await env.AI.run('@cf/openai/whisper', {
       audio: [...new Uint8Array(audioBuffer)]
     });
@@ -173,11 +366,11 @@ async function handleTranscription(request, env, corsHeaders) {
     const processingTime = Date.now() - startTime;
 
     // Store transcript in database
-    const transcriptResult = await env.TRANSCRIPTION_DB.prepare(`
-      INSERT INTO transcripts (video_id, transcript_text, confidence_score, word_count, processing_time_ms)
+    const transcriptResult = await env.TRANSCRIPTION_DB.prepare(
+      `INSERT INTO transcripts (video_id, transcript_text, confidence_score, word_count, processing_time_ms)
       VALUES (?, ?, ?, ?, ?)
     `).bind(
-      videoId, 
+      videoId,
       whisperResponse.text,
       whisperResponse.confidence || 0.95,
       whisperResponse.text.split(' ').length,
@@ -185,8 +378,8 @@ async function handleTranscription(request, env, corsHeaders) {
     ).run();
 
     // Update video status
-    await env.TRANSCRIPTION_DB.prepare(`
-      UPDATE videos SET transcription_status = 'completed' WHERE id = ?
+    await env.TRANSCRIPTION_DB.prepare(
+      `UPDATE videos SET transcription_status = 'completed' WHERE id = ?
     `).bind(videoId).run();
 
     return Response.json({
@@ -200,8 +393,8 @@ async function handleTranscription(request, env, corsHeaders) {
 
   } catch (error) {
     // Update status to failed
-    await env.TRANSCRIPTION_DB.prepare(`
-      UPDATE videos SET transcription_status = 'failed' WHERE id = ?
+    await env.TRANSCRIPTION_DB.prepare(
+      `UPDATE videos SET transcription_status = 'failed' WHERE id = ?
     `).bind(videoId).run();
 
     return Response.json({
@@ -213,14 +406,17 @@ async function handleTranscription(request, env, corsHeaders) {
   }
 }
 
+// Other functions (handleAIAnalysis, handleTextToSpeech, etc.) remain the same...
+// ... (rest of the file is unchanged)
+
 // Handle AI analysis and rating for THEOPHYSICS research
 async function handleAIAnalysis(request, env, corsHeaders) {
   const { videoId, analysisTypes = ['quality', 'relevance', 'factual'] } = await request.json();
 
   try {
     // Get transcript
-    const transcript = await env.TRANSCRIPTION_DB.prepare(`
-      SELECT t.*, v.title FROM transcripts t 
+    const transcript = await env.TRANSCRIPTION_DB.prepare(
+      `SELECT t.*, v.title FROM transcripts t 
       JOIN videos v ON t.video_id = v.id 
       WHERE v.id = ?
     `).bind(videoId).first();
@@ -284,12 +480,12 @@ Return format: {"score": 6.8, "claims_analysis": ["accurate physics concepts", "
 
     // Store analysis results
     for (const [type, result] of Object.entries(analysisResults)) {
-      await env.TRANSCRIPTION_DB.prepare(`
-        INSERT INTO ai_analysis (video_id, analysis_type, analysis_result, confidence_score, processing_model)
+      await env.TRANSCRIPTION_DB.prepare(
+        `INSERT INTO ai_analysis (video_id, analysis_type, analysis_result, confidence_score, processing_model)
         VALUES (?, ?, ?, ?, ?)
       `).bind(
-        videoId, 
-        type, 
+        videoId,
+        type,
         JSON.stringify(result),
         result.confidence || 0.8,
         'llama-3.1-8b-instruct'
@@ -299,8 +495,8 @@ Return format: {"score": 6.8, "claims_analysis": ["accurate physics concepts", "
     // Update video with average scores
     const avgScore = Object.values(analysisResults).reduce((sum, r) => sum + (r.score || 0), 0) / Object.keys(analysisResults).length;
     
-    await env.TRANSCRIPTION_DB.prepare(`
-      UPDATE videos SET 
+    await env.TRANSCRIPTION_DB.prepare(
+      `UPDATE videos SET 
         ai_rating_score = ?,
         content_quality_score = ?,
         research_relevance_score = ?,
@@ -338,8 +534,8 @@ async function handleTextToSpeech(request, env, corsHeaders) {
 
   try {
     // Get transcript
-    const transcript = await env.TRANSCRIPTION_DB.prepare(`
-      SELECT t.*, v.title FROM transcripts t 
+    const transcript = await env.TRANSCRIPTION_DB.prepare(
+      `SELECT t.*, v.title FROM transcripts t 
       JOIN videos v ON t.video_id = v.id 
       WHERE v.id = ?
     `).bind(videoId).first();
@@ -453,7 +649,8 @@ async function handleSearch(request, env, corsHeaders) {
 // Get service status and statistics
 async function handleStatus(request, env, corsHeaders) {
   try {
-    const stats = await env.TRANSCRIPTION_DB.prepare(`
+    const stats = await env.TRANSCRIPTION_DB.prepare(
+      `
       SELECT 
         COUNT(*) as total_videos,
         SUM(CASE WHEN transcription_status = 'completed' THEN 1 ELSE 0 END) as completed,
@@ -540,6 +737,122 @@ function chunkText(text, maxChunkSize) {
   }
   
   return chunks;
+}
+
+// Handle Browser Rendering - All endpoints in one unified handler
+async function handleBrowserRendering(request, env, corsHeaders) {
+  const { url, html, type, prompt, schema, options = {} } = await request.json();
+  
+  if (!url && !html) {
+    return Response.json({ error: 'Either url or html is required' }, { 
+      status: 400, 
+      headers: corsHeaders 
+    });
+  }
+
+  const accountId = env.ACCOUNT_ID || 'd6e387eea4a4dda973d797ece5c5c40a';
+  const apiToken = env.CLOUDFLARE_API_TOKEN || 'lEjW3ku9aCRTK3Jzf-IOnOlO7EhTES8DakNhs9Nq';
+  
+  const renderType = type || 'markdown'; // Default to markdown
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/browser-rendering/${renderType}`;
+
+  try {
+    let requestBody = {};
+    
+    // Build request based on type
+    if (url) requestBody.url = url;
+    if (html) requestBody.html = html;
+    
+    // Add type-specific options
+    switch (renderType) {
+      case 'json':
+        if (prompt) requestBody.prompt = prompt;
+        if (schema) {
+          requestBody.response_format = {
+            type: 'json_schema',
+            schema: schema
+          };
+        }
+        // Use custom Claude Sonnet 4 for better THEOPHYSICS analysis
+        if (options.useClaudeSonnet) {
+          requestBody.custom_ai = [{
+            model: 'anthropic/claude-sonnet-4-20250514',
+            authorization: `Bearer ${env.ANTHROPIC_API_KEY}`
+          }];
+        }
+        break;
+        
+      case 'pdf':
+        if (options.addStyleTag) requestBody.addStyleTag = options.addStyleTag;
+        if (options.viewport) requestBody.viewport = options.viewport;
+        break;
+        
+      case 'markdown':
+      case 'content':
+      case 'links':
+        if (options.rejectRequestPattern) requestBody.rejectRequestPattern = options.rejectRequestPattern;
+        if (options.visibleLinksOnly) requestBody.visibleLinksOnly = options.visibleLinksOnly;
+        break;
+    }
+    
+    // Common options for all types
+    if (options.userAgent) requestBody.userAgent = options.userAgent;
+    if (options.rejectResourceTypes) requestBody.rejectResourceTypes = options.rejectResourceTypes;
+
+    const renderResponse = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    if (!renderResponse.ok) {
+      const errorText = await renderResponse.text();
+      throw new Error(`Browser rendering failed: ${renderResponse.status} - ${errorText}`);
+    }
+
+    const result = await renderResponse.json();
+    
+    // Store result in database for THEOPHYSICS research tracking
+    if (result.success && url) {
+      await env.TRANSCRIPTION_DB.prepare(
+        `
+        INSERT INTO browser_renders (url, render_type, result_data, success, processing_time)
+        VALUES (?, ?, ?, ?, ?)
+      `).bind(
+        url,
+        renderType,
+        JSON.stringify(result.result),
+        true,
+        Date.now()
+      ).run();
+    }
+
+    return Response.json({
+      success: true,
+      type: renderType,
+      url: url,
+      result: result.result,
+      usage: {
+        service: 'Cloudflare Browser Rendering',
+        monthlyLimit: '1000 requests',
+        endpoint: renderType
+      },
+      theophysicsNote: renderType === 'json' ? 'Perfect for extracting structured research data' : `${renderType} rendering for research analysis`
+    }, { headers: corsHeaders });
+
+  } catch (error) {
+    return Response.json({
+      error: `Browser rendering failed: ${error.message}`,
+      type: renderType,
+      url: url
+    }, { 
+      status: 500,
+      headers: corsHeaders 
+    });
+  }
 }
 
 // Placeholder for TTS integration - you'll implement ElevenLabs integration

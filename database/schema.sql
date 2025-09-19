@@ -105,6 +105,24 @@ CREATE TABLE IF NOT EXISTS search_queries (
     created_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Browser renders table - tracks web content extraction for research
+CREATE TABLE IF NOT EXISTS browser_renders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL,
+    render_type TEXT NOT NULL, -- 'markdown', 'pdf', 'json', 'content', 'links', 'screenshot'
+    prompt TEXT, -- for AI-driven extraction
+    result_data TEXT, -- JSON result from Browser Rendering API
+    success BOOLEAN DEFAULT TRUE,
+    file_path TEXT, -- R2 path for PDFs/screenshots
+    processing_time INTEGER,
+    tokens_used INTEGER, -- for AI extraction types
+    related_video_id INTEGER REFERENCES videos(id), -- if linked to a video transcript
+    research_category TEXT, -- THEOPHYSICS category
+    created_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (related_video_id) REFERENCES videos(id)
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(transcription_status);
 CREATE INDEX IF NOT EXISTS idx_videos_rating ON videos(ai_rating_score DESC);
@@ -118,6 +136,10 @@ CREATE INDEX IF NOT EXISTS idx_transcripts_word_count ON transcripts(word_count)
 CREATE INDEX IF NOT EXISTS idx_analysis_video_id ON ai_analysis(video_id);
 CREATE INDEX IF NOT EXISTS idx_analysis_type ON ai_analysis(analysis_type);
 CREATE INDEX IF NOT EXISTS idx_analysis_timestamp ON ai_analysis(created_timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_browser_renders_url ON browser_renders(url);
+CREATE INDEX IF NOT EXISTS idx_browser_renders_type ON browser_renders(render_type);
+CREATE INDEX IF NOT EXISTS idx_browser_renders_timestamp ON browser_renders(created_timestamp DESC);
 
 -- Full-text search on transcripts (SQLite FTS5)
 CREATE VIRTUAL TABLE IF NOT EXISTS transcripts_fts USING fts5(

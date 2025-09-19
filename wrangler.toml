@@ -18,7 +18,7 @@ binding = "AI"
 [[d1_databases]]
 binding = "TRANSCRIPTION_DB"
 database_name = "transcription-pipeline"
-database_id = "564eb09f-2409-4b60-82a5-8076b77792c9"
+database_id = "b38c81b3-421d-4f26-8a5f-44b33f53052f"
 
 # R2 Storage binding for video files
 [[r2_buckets]]
@@ -26,14 +26,14 @@ binding = "TRANSCRIPTION_VIDEOS"
 bucket_name = "transcription-videos"
 
 # KV for caching (optional)
-[[kv_namespaces]]
-binding = "CACHE"
-id = "your_kv_namespace_id"
-preview_id = "your_kv_namespace_preview_id"
+# [[kv_namespaces]]
+# binding = "CACHE"
+# id = "your_kv_namespace_id"
+# preview_id = "your_kv_namespace_preview_id"
 
 # Custom domain configuration
 [[routes]]
-pattern = "transcribe.faiththruphysics.com/*"
+pattern = "transcribe.faiththruphysics.com"
 custom_domain = true
 
 # Environment variables
@@ -41,6 +41,9 @@ custom_domain = true
 ENVIRONMENT = "production"
 API_VERSION = "1.0.0"
 SERVICE_NAME = "THEOPHYSICS Transcription Pipeline"
+
+# Pages configuration
+pages_build_output_dir = "frontend"
 
 # Secrets (set via wrangler secret put)
 # ELEVENLABS_API_KEY - for text-to-speech
